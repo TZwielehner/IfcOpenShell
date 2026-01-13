@@ -1,3 +1,21 @@
+# BlenderBIM Add-on - OpenBIM Blender Add-on
+# Copyright (C) 2020, 2021 Dion Moult <dion@thinkmoult.com>
+#
+# This file is part of BlenderBIM Add-on.
+#
+# BlenderBIM Add-on is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# BlenderBIM Add-on is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with BlenderBIM Add-on.  If not, see <http://www.gnu.org/licenses/>.
+
 import os
 import bpy
 import json
@@ -5,12 +23,11 @@ import numpy as np
 import datetime
 import zipfile
 import tempfile
-import ifcopenshell
-import ifcopenshell.util.placement
-import ifcopenshell.api
-from ifcopenshell.api.spatial.data import Data as SpatialData
-from blenderbim.bim.ifc import IfcStore
 import addon_utils
+import ifcopenshell
+import ifcopenshell.api
+import ifcopenshell.util.placement
+from blenderbim.bim.ifc import IfcStore
 
 
 class IfcExporter:
@@ -77,8 +94,6 @@ class IfcExporter:
             if self.should_delete(obj):
                 to_delete.append(ifc_definition_id)
 
-        SpatialData.purge()
-
         for ifc_definition_id in to_delete:
             product = self.file.by_id(ifc_definition_id)
             IfcStore.unlink_element(product)
@@ -89,13 +104,16 @@ class IfcExporter:
             if not obj:
                 continue
             try:
-                bpy.ops.bim.update_representation(obj=obj.name)
+                if isinstance(obj, bpy.types.Material):
+                    bpy.ops.bim.update_style_colours(material=obj.name)
+                else:
+                    bpy.ops.bim.update_representation(obj=obj.name)
             except ReferenceError:
                 pass  # The object is likely deleted
         IfcStore.edited_objs.clear()
 
     def sync_object_placement(self, obj):
-        blender_matrix = np.matrix(obj.matrix_world)
+        blender_matrix = np.array(obj.matrix_world)
         element = self.file.by_id(obj.BIMObjectProperties.ifc_definition_id)
         if not hasattr(element, "ObjectPlacement"):
             return
@@ -139,7 +157,6 @@ class IfcExporter:
         else:
             parent_collection = obj.users_collection[0]
 
-
         parent_obj = bpy.data.objects.get(parent_collection.name)
         if not parent_obj or not parent_obj.BIMObjectProperties.ifc_definition_id:
             return
@@ -155,6 +172,7 @@ class IfcExporter:
         try:
             # This will throw an exception if the Blender object no longer exists
             foo = obj.name
+            foo
             return False
         except:
             return True
@@ -182,7 +200,6 @@ class IfcExportSettings:
 
     @staticmethod
     def factory(context, output_file, logger):
-        scene_bim = context.scene.BIMProperties
         settings = IfcExportSettings()
         settings.output_file = output_file
         settings.logger = logger

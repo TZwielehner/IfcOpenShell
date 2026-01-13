@@ -1,3 +1,21 @@
+# BlenderBIM Add-on - OpenBIM Blender Add-on
+# Copyright (C) 2020, 2021 Dion Moult <dion@thinkmoult.com>
+#
+# This file is part of BlenderBIM Add-on.
+#
+# BlenderBIM Add-on is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# BlenderBIM Add-on is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with BlenderBIM Add-on.  If not, see <http://www.gnu.org/licenses/>.
+
 import os
 import bpy
 import json
@@ -16,7 +34,7 @@ class AuginLogin(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        props = bpy.context.scene.AuginProperties
+        props = context.scene.AuginProperties
 
         url = "https://server.auge.pro.br/API/v3/augin_rest.php/user_login"
         payload = {"email": props.username, "password": props.password}
@@ -36,7 +54,7 @@ class AuginReset(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
-        props = bpy.context.scene.AuginProperties
+        props = context.scene.AuginProperties
         props.is_success = False
         return {"FINISHED"}
 
@@ -49,7 +67,8 @@ class AuginCreateNewModel(bpy.types.Operator):
     def execute(self, context):
         import boto3
         from botocore.config import Config
-        props = bpy.context.scene.AuginProperties
+
+        props = context.scene.AuginProperties
 
         # Create project
         url = "https://server.auge.pro.br/API/v3/augin_rest.php/new_model"
@@ -113,16 +132,15 @@ class AuginCreateNewModel(bpy.types.Operator):
         context.scene.render.image_settings.file_format = old_file_format
         context.scene.render.filepath = old_filepath
 
-        client.upload_file(bpy.context.scene.BIMProperties.ifc_file, result["s3_bucket"], result["model_path"])
+        client.upload_file(context.scene.BIMProperties.ifc_file, result["s3_bucket"], result["model_path"])
         client.upload_file(thumb_path, result["s3_bucket"], result["thumb_path"])
-
 
         # Notify done
         url = "https://server.auge.pro.br/API/v3/augin_rest.php/files_uploaded"
         payload = {
             "user_token": props.token,
-            "ifc_filesize": os.path.getsize(bpy.context.scene.BIMProperties.ifc_file),
-            "model_filesize": os.path.getsize(bpy.context.scene.BIMProperties.ifc_file),
+            "ifc_filesize": os.path.getsize(context.scene.BIMProperties.ifc_file),
+            "model_filesize": os.path.getsize(context.scene.BIMProperties.ifc_file),
             "thumb_filesize": os.path.getsize(thumb_path),
             "model_upload_path": result["model_path"],
             "thumb_upload_path": result["thumb_path"],

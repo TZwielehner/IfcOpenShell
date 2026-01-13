@@ -1,3 +1,21 @@
+# BlenderBIM Add-on - OpenBIM Blender Add-on
+# Copyright (C) 2020, 2021 Dion Moult <dion@thinkmoult.com>
+#
+# This file is part of BlenderBIM Add-on.
+#
+# BlenderBIM Add-on is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# BlenderBIM Add-on is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with BlenderBIM Add-on.  If not, see <http://www.gnu.org/licenses/>.
+
 import bpy
 import math
 import bmesh
@@ -22,8 +40,7 @@ def element_listener(element, obj):
 def mode_callback(obj, data):
     for obj in set(bpy.context.selected_objects + [bpy.context.active_object]):
         if (
-            obj.mode != "EDIT"
-            or not obj.data
+            not obj.data
             or not isinstance(obj.data, (bpy.types.Mesh, bpy.types.Curve, bpy.types.TextCurve))
             or not obj.BIMObjectProperties.ifc_definition_id
             or not bpy.context.scene.BIMProjectProperties.is_authoring
@@ -31,68 +48,23 @@ def mode_callback(obj, data):
             return
         product = IfcStore.get_file().by_id(obj.BIMObjectProperties.ifc_definition_id)
         parametric = ifcopenshell.util.element.get_psets(product).get("EPset_Parametric")
-        if not parametric or parametric["Engine"] != "BlenderBIM.DumbWall":
+        if not parametric or parametric["Engine"] != "BlenderBIM.DumbLayer2":
             return
-        if product.HasOpenings:
-            if [m for m in obj.modifiers if m.type == "BOOLEAN"]:
-                continue
-            representation = ifcopenshell.util.representation.get_representation(
-                product, "Model", "Body", "MODEL_VIEW"
+        if obj.mode == "EDIT":
+            bpy.ops.bim.dynamically_void_product(obj=obj.name)
+            IfcStore.edited_objs.add(obj)
+            bm = bmesh.from_edit_mesh(obj.data)
+            bmesh.ops.dissolve_limit(bm, angle_limit=pi / 180 * 1, verts=bm.verts, edges=bm.edges)
+            bmesh.update_edit_mesh(obj.data)
+            bm.free()
+        else:
+            new_origin = obj.matrix_world @ Vector(obj.bound_box[0])
+            obj.data.transform(
+                Matrix.Translation(
+                    (obj.matrix_world.inverted().to_quaternion() @ (obj.matrix_world.translation - new_origin))
+                )
             )
-            if not representation:
-                continue
-            bpy.ops.object.mode_set(mode='OBJECT')
-            bpy.ops.bim.switch_representation(
-                obj=obj.name,
-                should_switch_all_meshes=True,
-                should_reload=True,
-                ifc_definition_id=representation.id(),
-                disable_opening_subtractions=True,
-            )
-            bpy.ops.object.mode_set(mode='EDIT')
-        IfcStore.edited_objs.add(obj)
-        bm = bmesh.from_edit_mesh(obj.data)
-        bmesh.ops.dissolve_limit(bm, angle_limit=pi / 180 * 1, verts=bm.verts, edges=bm.edges)
-        bmesh.update_edit_mesh(obj.data)
-        bm.free()
-
-
-class AddWallOpening(bpy.types.Operator):
-    bl_idname = "bim.add_wall_opening"
-    bl_label = "Add Wall Opening"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        return IfcStore.execute_ifc_operator(self, context)
-
-    def _execute(self, context):
-        selected_objs = context.selected_objects
-        if len(selected_objs) == 0 or not context.active_object:
-            return {"FINISHED"}
-        wall_obj = context.active_object
-        if not wall_obj.BIMObjectProperties.ifc_definition_id:
-            return {"FINISHED"}
-        wall = IfcStore.get_file().by_id(wall_obj.BIMObjectProperties.ifc_definition_id)
-        if not wall.is_a("IfcWall"):
-            return {"FINISHED"}
-        local_location = wall_obj.matrix_world.inverted() @ context.scene.cursor.location
-        raycast = wall_obj.closest_point_on_mesh(local_location, distance=0.01)
-        if not raycast[0]:
-            return {"FINISHED"}
-        bpy.ops.mesh.primitive_cube_add(size=wall_obj.dimensions[1] * 2)
-        opening = bpy.context.selected_objects[0]
-
-        # Place the opening in the middle of the wall
-        global_location = wall_obj.matrix_world @ raycast[1]
-        normal = raycast[2]
-        normal.negate()
-        global_normal = wall_obj.matrix_world.to_quaternion() @ normal
-        opening.location = global_location + (global_normal * (wall_obj.dimensions[1] / 2))
-
-        opening.rotation_euler = wall_obj.rotation_euler
-        opening.name = "Opening"
-        bpy.ops.bim.add_opening(opening=opening.name, obj=wall_obj.name)
-        return {"FINISHED"}
+            obj.matrix_world.translation = new_origin
 
 
 class JoinWall(bpy.types.Operator):
@@ -101,10 +73,14 @@ class JoinWall(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
     join_type: bpy.props.StringProperty()
 
+    @classmethod
+    def poll(cls, context):
+        return context.selected_objects
+
     def execute(self, context):
-        selected_objs = context.selected_objects
-        if len(selected_objs) == 0:
-            return {"FINISHED"}
+        selected_objs = [o for o in context.selected_objects if o.BIMObjectProperties.ifc_definition_id]
+        for obj in selected_objs:
+            bpy.ops.bim.dynamically_void_product(obj=obj.name)
         if not self.join_type:
             for obj in selected_objs:
                 DumbWallJoiner(obj, obj).unjoin()
@@ -139,11 +115,14 @@ class AlignWall(bpy.types.Operator):
     bl_options = {"REGISTER", "UNDO"}
     align_type: bpy.props.StringProperty()
 
+    @classmethod
+    def poll(cls, context):
+        selected_valid_objects = [o for o in context.selected_objects if o.data and hasattr(o.data, "transform")]
+        return context.active_object and len(selected_valid_objects) > 1
+
     def execute(self, context):
-        selected_objs = context.selected_objects
-        if len(selected_objs) < 2 or not context.active_object:
-            return {"FINISHED"}
-        for obj in selected_objs:
+        selected_objects = [o for o in context.selected_objects if o.data and hasattr(o.data, "transform")]
+        for obj in selected_objects:
             if obj == context.active_object:
                 continue
             aligner = DumbWallAligner(obj, context.active_object)
@@ -162,10 +141,12 @@ class FlipWall(bpy.types.Operator):
     bl_label = "Flip Wall"
     bl_options = {"REGISTER", "UNDO"}
 
+    @classmethod
+    def poll(cls, context):
+        return context.selected_objects
+
     def execute(self, context):
-        selected_objs = context.selected_objects
-        if len(selected_objs) == 0:
-            return {"FINISHED"}
+        selected_objs = [o for o in context.selected_objects if o.data and hasattr(o.data, "transform")]
         for obj in selected_objs:
             DumbWallFlipper(obj).flip()
             IfcStore.edited_objs.add(obj)
@@ -177,12 +158,14 @@ class SplitWall(bpy.types.Operator):
     bl_label = "Split Wall"
     bl_options = {"REGISTER", "UNDO"}
 
+    @classmethod
+    def poll(cls, context):
+        return context.selected_objects
+
     def execute(self, context):
-        selected_objs = context.selected_objects
-        if len(selected_objs) == 0:
-            return {"FINISHED"}
+        selected_objs = [o for o in context.selected_objects if o.data and hasattr(o.data, "transform")]
         for obj in selected_objs:
-            DumbWallSplitter(obj, bpy.context.scene.cursor.location).split()
+            DumbWallSplitter(obj, context.scene.cursor.location).split()
             IfcStore.edited_objs.add(obj)
         return {"FINISHED"}
 
@@ -198,6 +181,8 @@ def recalculate_dumb_wall_origin(wall, new_origin=None):
         )
     )
     wall.matrix_world.translation = new_origin
+    for child in wall.children:
+        child.matrix_parent_inverse = wall.matrix_world.inverted()
 
 
 class DumbWallSplitter:
@@ -273,6 +258,9 @@ class DumbWallFlipper:
         ).length < 0.001:
             recalculate_dumb_wall_origin(self.wall, self.wall.matrix_world @ Vector(self.wall.bound_box[7]))
             self.rotate_wall_180()
+            bpy.context.view_layer.update()
+            for child in self.wall.children:
+                child.matrix_parent_inverse = self.wall.matrix_world.inverted()
         else:
             recalculate_dumb_wall_origin(self.wall)
 
@@ -411,16 +399,20 @@ class DumbWallJoiner:
     # plane denoted by the target coordinate.
     def extend(self):
         wall1_min_faces, wall1_max_faces = self.get_wall_end_faces(self.wall1)
-        ef1_distance = abs(mathutils.geometry.distance_point_to_plane(
-            self.wall1_matrix @ self.wall1.data.vertices[wall1_min_faces[0].vertices[0]].co,
-            self.target_coordinate,
-            self.pos_x,
-        ))
-        ef2_distance = abs(mathutils.geometry.distance_point_to_plane(
-            self.wall1_matrix @ self.wall1.data.vertices[wall1_max_faces[0].vertices[0]].co,
-            self.target_coordinate,
-            self.neg_x,
-        ))
+        ef1_distance = abs(
+            mathutils.geometry.distance_point_to_plane(
+                self.wall1_matrix @ self.wall1.data.vertices[wall1_min_faces[0].vertices[0]].co,
+                self.target_coordinate,
+                self.pos_x,
+            )
+        )
+        ef2_distance = abs(
+            mathutils.geometry.distance_point_to_plane(
+                self.wall1_matrix @ self.wall1.data.vertices[wall1_max_faces[0].vertices[0]].co,
+                self.target_coordinate,
+                self.neg_x,
+            )
+        )
         if ef1_distance < ef2_distance:
             self.project_end_faces_to_target(wall1_min_faces)
         else:
@@ -618,6 +610,8 @@ class DumbWallJoiner:
         min_x = min([v[0] for v in wall.bound_box])
         max_x = max([v[0] for v in wall.bound_box])
         for f in wall.data.polygons:
+            if abs(f.normal.x) < 0.1:
+                continue
             end_face_index = self.get_wall_face_end(wall, f, min_x, max_x)
             if end_face_index == 1:
                 min_faces.append(f)
@@ -628,9 +622,9 @@ class DumbWallJoiner:
     # 1 is the leftmost (minimum local X axis) end, and 2 is the rightmost end
     def get_wall_face_end(self, wall, face, min_x, max_x):
         for v in face.vertices:
-            if wall.data.vertices[v].co.x == min_x and abs(face.normal.x) > 0.1:
+            if wall.data.vertices[v].co.x == min_x:
                 return 1
-            if wall.data.vertices[v].co.x == max_x and abs(face.normal.x) > 0.1:
+            if wall.data.vertices[v].co.x == max_x:
                 return 2
 
 
@@ -648,7 +642,7 @@ class DumbWallGenerator:
                 if material.is_a("IfcMaterialLayerSet"):
                     thicknesses = [l.LayerThickness for l in material.MaterialLayers]
                     break
-        if not thicknesses:
+        if not sum(thicknesses):
             return
 
         self.collection = bpy.context.view_layer.active_layer_collection.collection
@@ -780,21 +774,28 @@ class DumbWallGenerator:
         ]
         mesh = bpy.data.meshes.new(name="Wall")
         mesh.from_pydata(verts, [], faces)
-        obj = bpy.data.objects.new("Wall", mesh)
+
+        ifc_classes = ifcopenshell.util.type.get_applicable_entities(self.relating_type.is_a(), self.file.schema)
+        # Standard cases are deprecated, so let's cull them
+        ifc_class = [c for c in ifc_classes if "StandardCase" not in c][0]
+
+        obj = bpy.data.objects.new(ifc_class[3:], mesh)
         obj.location = self.location
         obj.rotation_euler[2] = self.rotation
         if self.collection_obj and self.collection_obj.BIMObjectProperties.ifc_definition_id:
             obj.location[2] = self.collection_obj.location[2]
         self.collection.objects.link(obj)
+
         bpy.ops.bim.assign_class(
             obj=obj.name,
-            ifc_class="IfcWall",
+            ifc_class=ifc_class,
             ifc_representation_class="IfcExtrudedAreaSolid/IfcArbitraryClosedProfileDef",
         )
+
         bpy.ops.bim.assign_type(relating_type=self.relating_type.id(), related_object=obj.name)
         element = self.file.by_id(obj.BIMObjectProperties.ifc_definition_id)
         pset = ifcopenshell.api.run("pset.add_pset", self.file, product=element, name="EPset_Parametric")
-        ifcopenshell.api.run("pset.edit_pset", self.file, pset=pset, properties={"Engine": "BlenderBIM.DumbWall"})
+        ifcopenshell.api.run("pset.edit_pset", self.file, pset=pset, properties={"Engine": "BlenderBIM.DumbLayer2"})
         MaterialData.load(self.file)
         obj.select_set(True)
         return obj
@@ -803,7 +804,7 @@ class DumbWallGenerator:
 def ensure_solid(usecase_path, ifc_file, settings):
     product = ifc_file.by_id(settings["blender_object"].BIMObjectProperties.ifc_definition_id)
     parametric = ifcopenshell.util.element.get_psets(product).get("EPset_Parametric")
-    if not parametric or parametric["Engine"] != "BlenderBIM.DumbWall":
+    if not parametric or parametric["Engine"] != "BlenderBIM.DumbLayer2":
         return
     settings["ifc_representation_class"] = "IfcExtrudedAreaSolid/IfcArbitraryClosedProfileDef"
 
@@ -815,7 +816,7 @@ def generate_axis(usecase_path, ifc_file, settings):
     obj = settings["blender_object"]
     product = ifc_file.by_id(obj.BIMObjectProperties.ifc_definition_id)
     parametric = ifcopenshell.util.element.get_psets(product).get("EPset_Parametric")
-    if not parametric or parametric["Engine"] != "BlenderBIM.DumbWall":
+    if not parametric or parametric["Engine"] != "BlenderBIM.DumbLayer2":
         return
     old_axis = ifcopenshell.util.representation.get_representation(product, "Model", "Axis", "GRAPH_VIEW")
     if settings["context"].ContextType == "Model" and getattr(settings["context"], "ContextIdentifier") == "Body":
@@ -848,7 +849,7 @@ def calculate_quantities(usecase_path, ifc_file, settings):
     obj = settings["blender_object"]
     product = ifc_file.by_id(obj.BIMObjectProperties.ifc_definition_id)
     parametric = ifcopenshell.util.element.get_psets(product).get("EPset_Parametric")
-    if not parametric or parametric["Engine"] != "BlenderBIM.DumbWall":
+    if not parametric or parametric["Engine"] != "BlenderBIM.DumbLayer2":
         return
     qto = ifcopenshell.api.run(
         "pset.add_qto", ifc_file, should_run_listeners=False, product=product, name="Qto_WallBaseQuantities"
@@ -932,7 +933,7 @@ class DumbWallPlaner:
 
     def change_thickness(self, element, thickness):
         parametric = ifcopenshell.util.element.get_psets(element).get("EPset_Parametric")
-        if not parametric or parametric["Engine"] != "BlenderBIM.DumbWall":
+        if not parametric or parametric["Engine"] != "BlenderBIM.DumbLayer2":
             return
 
         obj = IfcStore.get_element(element.id())
@@ -958,15 +959,19 @@ class DumbWallPlaner:
         IfcStore.edited_objs.add(obj)
 
     def thicken_face(self, face, delta_thickness):
-        slide_magnitude = abs(delta_thickness) / 2
+        slide_magnitude = abs(delta_thickness)
         for vert in face.verts:
             slide_vector = None
             for edge in vert.link_edges:
                 other_vert = edge.verts[1] if edge.verts[0] == vert else edge.verts[0]
                 if delta_thickness > 0:
-                    potential_slide_vector = vert.co - other_vert.co
+                    potential_slide_vector = (vert.co - other_vert.co).normalized()
+                    if potential_slide_vector.y < 0:
+                        continue
                 else:
-                    potential_slide_vector = other_vert.co - vert.co
+                    potential_slide_vector = (other_vert.co - vert.co).normalized()
+                    if potential_slide_vector.y > 0:
+                        continue
                 if abs(potential_slide_vector.x) > 0.9 or abs(potential_slide_vector.z) > 0.9:
                     continue
                 slide_vector = potential_slide_vector

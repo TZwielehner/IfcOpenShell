@@ -135,6 +135,7 @@ def validate(f, logger):
             logger.set_instance(inst)
 
         entity = schema.declaration_by_name(inst.is_a())
+        attrs = entity.all_attributes()
 
         if entity.is_abstract():
             e = "Entity %s is abstract" % entity.name()
@@ -143,20 +144,38 @@ def validate(f, logger):
             else:
                 logger.error("In %s\n%s", inst, e)
 
-        for attr, val, is_derived in zip(entity.all_attributes(), inst, entity.derived()):
+        has_invalid_value = False
+        for i in range(len(attrs)):
+            try:
+                inst[i]
+                pass
+            except:
+                if hasattr(logger, "set_instance"):
+                    logger.error("Invalid attribute value for %s.%s", entity, attrs[i])
+                else:
+                    logger.error(
+                        "In %s\nInvalid attribute value for %s.%s",
+                        inst,
+                        entity,
+                        attrs[i],
+                    )
+                has_invalid_value = True
 
-            if val is None and not (is_derived or attr.optional()):
-                logger.error("Attribute %s.%s not optional", entity, attr)
+        if not has_invalid_value:
+            for attr, val, is_derived in zip(attrs, inst, entity.derived()):
 
-            if val is not None:
-                attr_type = attr.type_of_attribute()
-                try:
-                    assert_valid(attr, val, schema)
-                except ValidationError as e:
-                    if hasattr(logger, "set_instance"):
-                        logger.error(str(e))
-                    else:
-                        logger.error("In %s\n%s", inst, e)
+                if val is None and not (is_derived or attr.optional()):
+                    logger.error("Attribute %s.%s not optional", entity, attr)
+
+                if val is not None:
+                    attr_type = attr.type_of_attribute()
+                    try:
+                        assert_valid(attr, val, schema)
+                    except ValidationError as e:
+                        if hasattr(logger, "set_instance"):
+                            logger.error(str(e))
+                        else:
+                            logger.error("In %s\n%s", inst, e)
 
         for attr in entity.all_inverse_attributes():
             val = getattr(inst, attr.name())
